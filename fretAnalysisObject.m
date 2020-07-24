@@ -1,39 +1,26 @@
 classdef fretAnalysisObject < handle
     
-    % (1) Clear bleaching step (10%)
-    % (2) Steady baseline
-    %
-    %
     
-    % How to use %
+    % USAGE %
     %
-    % Load in data
-    % myfret = fretAnalysisObject('C:\#wes_smFRET\#01Ch2\'); 
-    
-    % Look for multiple particles in a square
-    % area of side length (obj.dw) centered on Ch2 x,y coordinates
-    % 
+    % Load in data:
+    % myfret = fretAnalysisObject('C:\#wes_smFRET\#01Ch2\','Experiment name'); 
     % myfret.getInterferences(); 
-    % myfret.getBleach('Ch1'); 
-    % myfret.getBleach('Ch2');
-    % 
-    % Combine segments from obj.fretTraces.Diff.Ch1.segResFinal
-    % Column labels:
-    % ids = 23; segstart = 1; segend = 2; state = 3
-    %
-    % myfret.parse_segResFinal();
-    %
-    % Calculates fret by combining  
-    %
-    % myfret.calculateFret();
+    % myfret.removeInterference();
+    % %In the next command, omit the 1 in order to avoid re-producing figures%
+    % myfret.calculateFret('free',1); 
+    % myfret.calculateFret('immobile',1);
+    % myfret.make_cellViewTraces();
     
     properties
         images
         fretTraces
         ROImatrix
         dcmss
+        experimentName
         
         filename
+        cellnum
         
         Ntracks
         Ntimes
@@ -43,10 +30,11 @@ classdef fretAnalysisObject < handle
         % Details about traces %
         Ch1
         Ch2
-        traceInterference = {};
+        traceInterference
+        numPixels
         
         % Interference detection parameters %
-        dw = 5;
+        dw = 3;
         
         % Baseline fitting parameters %
         windowsize = 100; % VERY FLEXIBLE
@@ -57,7 +45,7 @@ classdef fretAnalysisObject < handle
     
     methods
         
-        function obj = fretAnalysisObject( experimentDir )
+        function obj = fretAnalysisObject( experimentDir, experimentName )
             
             if exist( fullfile( experimentDir, 'fretTracesDif.mat' ) )
                     fprintf('\n----------------------------------------------\n');
@@ -71,8 +59,11 @@ classdef fretAnalysisObject < handle
                    return 
             end
             
+            obj.experimentName = experimentName;
+            
             tmp = load( fretTracesFile, 'fretTraces' );
             obj.filename = fretTracesFile;
+            obj.cellnum = regexp( obj.filename, '(?<=#)[0-9]{2}', 'match' );
             obj.fretTraces = tmp.fretTraces;
             
             img_files = dir(sprintf('%s\\ImageData\\*.tif',experimentDir));
@@ -100,14 +91,13 @@ classdef fretAnalysisObject < handle
             
         end
         
-        function output = getBleach_single( obj, ch, traceid, varargin )
+        function output = getBleach_single( obj, traceid, varargin )
             
             % CONSTANTS %
             windowsize = obj.windowsize; % VERY FLEXIBLE
             auROC_min = obj.auROC_min; % Needed to describe where there is a "stable" period
             NbaselinePts = obj.NbaselinePts; % These are the number of points needed to sample the baseline
 
-        
             % BASES %
             % (1) obj.fretTraces.(ch).int(traceid,:) (raw data) is in full
             % frame basis [1:4000] and same for every trace
@@ -116,62 +106,62 @@ classdef fretAnalysisObject < handle
             % (4) bleachpoint_frame is in frame basis [1:4000]
             % (5) bleachpoint_idxes is in idxes basis 
             
-            [start_, end_, baseline_] = deal( obj.fretTraces.(ch).traceMetadata(traceid).startOfTrace, obj.fretTraces.(ch).traceMetadata(traceid).endOfTrace, obj.fretTraces.(ch).traceMetadata(traceid).lenBaseline );
-            idxes = [start_ : min(start_+end_+baseline_,numel(obj.fretTraces.(ch).int(traceid,:))) ];
-
-            if and( isfield( obj.fretTraces.Ch1,'int_clean' ),isfield( obj.fretTraces.Ch2,'int_clean' ) );
-                z = obj.fretTraces.(ch).int_clean(traceid,idxes)';
-                % Interpolate nans
-                z(find(isnan(z)==1)) = interp1( find(isnan(z)==0), z(find(isnan(z)==0)), find(isnan(z)==1) );
-            else
-                z = obj.fretTraces.(ch).int(traceid,idxes)';
-            end
-
+            [Ch1.start_, Ch1.end_, Ch1.baseline_] = deal( obj.fretTraces.Ch1.traceMetadata(traceid).startOfTrace, obj.fretTraces.Ch1.traceMetadata(traceid).endOfTrace, obj.fretTraces.Ch1.traceMetadata(traceid).lenBaseline );
+            [Ch2.start_, Ch2.end_, Ch2.baseline_] = deal( obj.fretTraces.Ch2.traceMetadata(traceid).startOfTrace, obj.fretTraces.Ch2.traceMetadata(traceid).endOfTrace, obj.fretTraces.Ch2.traceMetadata(traceid).lenBaseline );
+            
             % min(50,windowsize) is intended to catch situations where the 
-            aurocs = arrayfun( @(x) obj.auroc( z, x, min(50,windowsize) ), [1:numel(z)] );
-            [~,b] = min(aurocs);
-            bleachpoint = b;
-
+            % DO NOT USE AUROC
+            % aurocs = arrayfun( @(x) obj.auroc( z, x, min(50,windowsize) ), [1:numel(z)] );
+            % [~,b] = min(aurocs);
+            
             % Baseline calculation %
             % First, calculate auROCS for pre- and post-bleaching
-            [auroc_fret,auroc_baseline] = deal( aurocs(1:b), aurocs(b+1:end ) );
+            % [auroc_fret,auroc_baseline] = deal( aurocs(1:b), aurocs(b+1:end ) );
             
             % Second, split F data into pre- and post-bleaching
-            F_prebleach = z(b-50:b);
-            F_postbleach = z(b+1:end);
+            z2 = obj.fretTraces.Ch2.int_clean(traceid,:); z2(z2==0)=nan; % Removing interferences creates 0
+            z3 = obj.fretTraces.Ch2.int(traceid,:); % No clean intensity for post-bleaching is calculated
+            Ch2.F_postbleach = nanmedian( z3(Ch2.end_: min( numel(z3), Ch2.end_+100 ) ) );
             
-            % Third, accumulate postbleach points
-            F_postbleach_steady = F_postbleach(find(abs(auroc_baseline-0.5)<(0.5-auROC_min), NbaselinePts ));
-
-            baseline =                      nanmedian( F_postbleach_steady );
-            F0 =                            nanmedian( F_prebleach );
-            F0_quality =                    1 - nanstd( F_prebleach )./F0;
-            baseline_quality =              1 - nanstd( F_postbleach_steady )./F0;
+            z1 = obj.fretTraces.Ch1.int_clean(traceid,:); % Acceptor intensity
+            Ch1.F_postbleach = nanmedian( z1(Ch2.end_: min( numel(z1), Ch2.end_+100 ) ) );
+           
+            % Next, stepwise adjustment of traces
+            % Remove the offset after bleaching occurs
+            z_1 = obj.fretTraces.Ch1.int_clean(traceid,:) - Ch1.F_postbleach;
+            z_2 = obj.fretTraces.Ch2.int_clean(traceid,:) - Ch2.F_postbleach;
             
-            output =                        struct();
+            Ch2.F_postAcceptor = nanmedian( z_2(Ch1.end_ : Ch2.end_) ); % Goes until donor (Ch2) bleaches
+            Ch1.F_postAcceptor = nanmedian( z_1(Ch1.end_ : Ch2.end_) ); % Goes until donor (Ch2) bleaches
             
-            output.aurocs =                 aurocs;
-            output.channel =                ch;
+            Ch1.F_prebleach = nanmean( z1(Ch1.start_ : Ch1.end_) );
+            Ch2.F_prebleach = nanmean( z2(Ch2.start_:Ch2.end_) );
             
-            output.parameter_windowsize =   windowsize;
-            output.parameter_auROC_min =    auROC_min;
             
-            output.bleachpoint_idxes =      bleachpoint;
-            output.bleachpoint_frame =      idxes(bleachpoint);
-            
-            output.prebleach_baseline =     F0;
-            output.postbleach_baseline =    baseline;
-            output.prebleach_quality =      F0_quality;
-            output.postbleach_quality =     baseline_quality;
             
             if ~isempty( varargin )
                 figure('color','w'); 
-                plot( z ); line( [bleachpoint,bleachpoint], [min(z),max(z)], 'color', 'r' )
-                line( [1,bleachpoint], [F0+baseline,F0+baseline], 'color','k','linewidth',5 );
-                line( [bleachpoint,numel(z)], [baseline,baseline], 'color','k','linewidth',5 );
+                plot( z1 ); 
+                line( [Ch1.start_, Ch1.end_], [Ch1.F_prebleach, Ch1.F_prebleach], 'color', 'r' )
+                line( [Ch1.end_, Ch2.end_], [Ch1.F_postAcceptor, Ch1.F_postAcceptor], 'color','g','linewidth',2 );
+                line( [Ch2.end_, numel(z1)], [Ch1.F_postbleach,Ch1.F_postbleach], 'color','k','linewidth',2 );
                 set(gca,'TickDir','out'); box off;
                 set(gcf,'Position',[35,558,1400,240]);
+                xlim([Ch1.start_,numel(z1)]);
+                
+                figure('color','w'); 
+                plot( z2 ); hold on; plot( Ch2.end_:numel(z3), z3(Ch2.end_:numel(z3)) );
+                line( [Ch2.start_, Ch1.end_], [Ch2.F_prebleach, Ch2.F_prebleach], 'color', 'r' )
+                line( [Ch1.end_, Ch2.end_], [Ch2.F_postAcceptor, Ch2.F_postAcceptor], 'color','g','linewidth',2 );
+                line( [Ch2.end_, numel(z2)], [Ch2.F_postbleach,Ch2.F_postbleach], 'color','k','linewidth',2 );
+                set(gca,'TickDir','out'); box off;
+                set(gcf,'Position',[35,558,1400,240]);
+                xlim([Ch2.start_,numel(z2)]);
+                
             end
+            
+            output.Ch1 = Ch1;
+            output.Ch2 = Ch2;
             
         end
         
@@ -267,115 +257,158 @@ classdef fretAnalysisObject < handle
         end
         
         
-        % A function used to getInterferences amomg pixels %
+        % A function used to calculate correlations  %
         function getInterferences( obj )
            
-            %ROImatrix = [];
             [imrows,imcols] = deal(size(obj.images{1},1), size(obj.images{1},2) );
+            template = padarray( padarray( fspecial('gaussian',3,1), 1, -5 )', 1, -5 );
+            periphery = padarray( padarray( zeros(3,3), 1, 1 )', 1, 1 );
             
-            for N = 1:2%obj.Ntracks
+            obj.traceInterference = nan( obj.Ntracks, obj.Ntimes );
+            obj.numPixels = nan( obj.Ntracks, obj.Ntimes );
                 
-                %tic;
-                mydata = obj.fretTraces.Ch2.x(N,:);
+            for N = 1:obj.Ntracks
+                    
+                dw=1;
                 
-                idx = [ obj.fretTraces.Ch2.traceMetadata(N).startOfTrace:obj.fretTraces.Ch2.traceMetadata(N).endOfTrace+obj.fretTraces.Ch2.traceMetadata(N).lenBaseline]; 
+                idx = [ obj.fretTraces.Ch2.traceMetadata(N).startOfTrace:obj.fretTraces.Ch2.traceMetadata(N).endOfTrace ]; 
+                score_ = [];
+                background = [];
+                numpixels = [];
+                nan_removed_x = fix( obj.removeNaNs( obj.fretTraces.Ch2.x(N,:) ) );
+                nan_removed_y = fix( obj.removeNaNs( obj.fretTraces.Ch2.y(N,:) ) );
                 
                 for frame_ = idx
-                    x=fix( obj.fretTraces.Ch2.x(N,frame_) );
-                    y=fix( obj.fretTraces.Ch2.y(N,frame_) );
-                    dw = obj.dw;
                     
-                    try
-                        background = obj.images{frame_}( [max(y-3*dw,1):min(y+3*dw,imcols)], [max(x-3*dw,1):min(x+3*dw,imrows)] );
-                        [mean_,sd_] = deal( mean2(background), std2(background) );
-                        if isempty(intersect( [y+[-dw:dw], x+[-dw:dw]], [0,256] ))
-                            tmp_traceInterference(N).information(frame_) = obj.numrois( obj.images{frame_}( y+[-dw:dw], x+[-dw:dw] ), mean_, sd_ );
-                            %ROImatrix(N,frame_) = 1;
-                        else
-                            tmp_traceInterference(N).information(frame_) = obj.numrois(); % Frames cannot be assessed; too close to edge of image
-                            %ROImatrix(N,frame_) = nan; 
-                        end
-                    catch
-                       %1
-                    end
-                    %2
+                    x = nan_removed_x(frame_);
+                    y = nan_removed_y(frame_);
+                    
+                    background(:,:,frame_) = obj.images{frame_}( [max(y-2*dw,1):min(y+2*dw,imcols)], [max(x-2*dw,1):min(x+2*dw,imrows)] );
+                    
                 end
                 
-                % Once a trace is complete, store all the structured info
-                % as a table for easier analysis
-                obj.traceInterference{N} = struct2table( tmp_traceInterference(N).information );
+                % Convolve the data using a 3d gaussian
+                background2 = imgaussfilt3(background, [0.1,0.1,10] )+imgaussfilt3(background, [0.1,0.1,3] );
+                % Compare each frame in the convolved movie to a template
+                for frame_ = idx
+                    score_(frame_) = corr2( background2(:,:,frame_), template );
+                end
                 
-                %t = toc;
-                %fprintf('Time remaining: %1.2f\n', t/(N/obj.Ntracks))
+                periphery_frames = find( score_ > obj.min_corr );
+                periphery_v_t = fliplr(arrayfun( @(x) mean2(background(:,:,x).*periphery), periphery_frames ));
+                obj.fretTraces.Ch2.background(N) = nanmean( periphery_v_t( find( periphery_v_t>0, 100 ) ) ); % Mean of the first 100 points
+                obj.fretTraces.Ch1.background(N) = nanmedian( obj.fretTraces.Ch1.int(N,min(4000,obj.fretTraces.Ch2.traceMetadata(N).endOfTrace+[0:100])) ); % Mean of the first 100 points
+                
+                %figure; plot( periphery_v_t, 'o' ); title(periphery_mean)
+                obj.traceInterference(N,idx) = score_(idx);
+               
             end
-            
-            %obj.ROImatrix = ROImatrix;
-            
         end
         
         function removeInterference( obj )
             
-            % Kmeans method %
+            obj.fretTraces.Ch1.int_clean = obj.fretTraces.Ch1.int - repmat( obj.fretTraces.Ch1.background, obj.Ntimes, 1 )';
+            info = fitgmdist( obj.traceInterference( obj.traceInterference>0.5 ), 1 );
             
-            tmp_ = table2array( obj.traceInterference{1} );
-            tmp = [ smooth(tmp_(:,1),5),...
-                    smooth(hampel(tmp_(:,2),100,1),5),...
-                    smooth(hampel(tmp_(:,3),100,1),5) ];
-            tmp = obj.nanzscore(tmp);
+            threshold = info.mu - 3*info.Sigma;
+            fprintf('Using threshold of %1.2f\n',threshold)
+            obj.fretTraces.Ch2.int_clean = obj.fretTraces.Ch2.int .* (obj.traceInterference>threshold)  - repmat( obj.fretTraces.Ch2.background, obj.Ntimes, 1 )';
             
-            % Display using patch %
-            
-                
-            obj.fretTraces.Ch1.int_clean = obj.fretTraces.Ch1.int;
-            obj.fretTraces.Ch2.int_clean = obj.fretTraces.Ch2.int;
-            
-            for i = 1:size(obj.ROImatrix,1)
-                ROImatrix_(i,:) = smooth( obj.ROImatrix(i,:), 5 );
-            end
-            obj.fretTraces.Ch1.int_clean( ROImatrix_>1 ) = nan;
-            obj.fretTraces.Ch2.int_clean( ROImatrix_>1 ) = nan;
-            
+            % figure; hist( log( myfret.flatten( myfret.fretTraces.Ch2.int .* (isnan(myfret.traceInterference)==0)
         end
         
-        function calculateFret( obj )
+        function calculateFret( obj, movType, varargin )
             
-            ROImatrix_ = obj.ROImatrix < 2;
-            ROImatrix_ = ROImatrix_.*circshift( ROImatrix_, [0, 1] );%.*circshift( ROImatrix_, [0, 3] ).*circshift( ROImatrix_, [0, 4] );
             
-            DCMSSmatrix_ = (obj.DCMSSmatrix==2);
+            if isempty(varargin); vis = 0; else vis=1; end;
             
-            goodValues = ROImatrix_.*DCMSSmatrix_;
+            % Calculate all fret values %
+            if ~or( strcmp(movType,'free'), strcmp(movType,'immobile') ); fprintf("\nInput error! Input either \'free\' or \'immobile\'\n\n"); return; end
             
-            Nvalues = 125;
-            goodValues_array = arrayfun( @(x) find(goodValues(x,:)~=0,Nvalues), [1:size(goodValues,1)], 'UniformOutput', false );
+            fret = (obj.fretTraces.Ch1.int_clean)./(obj.fretTraces.Ch1.int_clean+obj.fretTraces.Ch2.int_clean);
+            if strcmp(movType,'immobile'); fret = fret .* (obj.fretTraces.Diff.Ch1.idlCnf) + fret .* (obj.fretTraces.Diff.Ch1.idlImb); end
+            if strcmp(movType,'free'); fret = fret .* (obj.fretTraces.Diff.Ch1.idlFre); end
+            fret(find(fret>=1 | fret<=0 ))=nan;
+            fret_truncated = arrayfun( @(x) fret( x, find(  fret(x,:)>0 & isnan( fret(x,:) ) == 0 , 500 ) ), [1:size(fret,1)], 'UniformOutput', false );
             
-            tmp = zeros( size( ROImatrix_ ) );
-            for i = 1:size( ROImatrix_,1 );
-                tmp = tmp + accumarray( [i*ones(numel(goodValues_array{i}),1), goodValues_array{i}'], ones(1,numel(goodValues_array{i})), size(ROImatrix_) );
-            end
-           
-            fret = (obj.fretTraces.Ch1.int.*tmp)./(obj.fretTraces.Ch1.int.*tmp+obj.fretTraces.Ch2.int.*tmp);
-            fret( or(fret<0, fret>1) ) = nan;
+            % Calculate prebleach F values and see which may be unlikely %
+            fret_by_particle = cellfun( @(x) nanmean( x(x>0) ), fret_truncated );
+            outputs = arrayfun( @(x) obj.getBleach_single( x ), [1 : obj.Ntracks] );
             
-            lengths_by_particle = cellfun( @(x) numel(x), goodValues_array );
+            % Ch1_ch2 prebleach F is a two column array with rows equal to
+            % the number of tracks under analysis
             
-            fret_by_particle = nanmean(fret, 2);
+            ch1_ch2_prebleach_F = [arrayfun( @(x) x.Ch1.F_prebleach, outputs )', arrayfun( @(x) x.Ch2.F_prebleach, outputs )'];
             
-            figure('color','w'); subplot(1,2,1);
-            bins = [0:0.05:1];
+            % 'VariableNames', {'Min_Ch1','Max_Ch1','Min_Ch2','Max_Ch2'} )
+            % Rows are each of the groups produced by dbscan
+            %
+            % The r variable is a first-pass filter based on the range of
+            % values we believe the Ch1 and Ch2 could take
+            %
+            % Note that this is only used to create a sample for the Gaussian
+            % fit in the next step (it is not an actual threshold on the data)
+            %
+            % These parameters should be inferred but for now they're hard
+            % coded
+            [r,~] = find( sum( or( ch1_ch2_prebleach_F<10, ch1_ch2_prebleach_F>600), 2 ) == 0 );
+            
+            if vis; figure; scatter( ch1_ch2_prebleach_F(r,1), ch1_ch2_prebleach_F(r,2), 50 ); end
+            
+            % Calculate a Gaussian fit for the thresholded data
+            
+            fret_by_cell_gm = fitgmdist( [ch1_ch2_prebleach_F(r,1), ch1_ch2_prebleach_F(r,2)], 1 );
+            
+            ll_data = pdf( fret_by_cell_gm, [ch1_ch2_prebleach_F(:,1), ch1_ch2_prebleach_F(:,2)] );
+            result_ = ll_data > .5*10^-5;
+            starttime = arrayfun( @(x) x.endOfTrace, obj.fretTraces.Ch1.traceMetadata )';
+            npoints = cellfun( @(x) numel(x), fret_truncated );
+            
+            figure; imagesc( fret( result_, : ) )
+                        
+            % A mesh grid to span the values of the times in the movie data
+            % and the extracted tracks under analysis
+            %[fret_time,fret_trace] = meshgrid( [1:obj.Ntimes],[1:obj.Ntracks] );
+            %x = fret( result_, : ).*fret_time( result_, : ); 
+            %y = fret( result_, : ).*fret_trace( result_, : );
+            
+            if vis; figure('color','k'); 
+            %scatter( ch1_ch2_prebleach_F(:,1), ch1_ch2_prebleach_F(:,2), 50, result_, 'filled', 'MarkerFaceAlpha', 0.5 );
+        
+            ax_ = arrayfun(@(x) subplot(2,2,x), [1:4] );
+            subplot(2,2,1);scatter( ch1_ch2_prebleach_F(:,1), ch1_ch2_prebleach_F(:,2), 50, result_, 'filled', 'MarkerFaceAlpha', 0.5 );
+            subplot(2,2,2);scatter( ch1_ch2_prebleach_F(find(result_==1),1), ch1_ch2_prebleach_F(find(result_==1),2), 50, starttime(find(result_==1)), 'filled', 'MarkerFaceAlpha', 0.5 );
+            subplot(2,2,3);scatter( ch1_ch2_prebleach_F(find(result_==1),1), ch1_ch2_prebleach_F(find(result_==1),2), 50, npoints(find(result_==1)), 'filled', 'MarkerFaceAlpha', 0.25 );
+            
+            myst = suptitle( sprintf('Cell %s (%s)', obj.cellnum{1}, movType ) );
+            myst.Color=[1,1,1]; myst.FontWeight='normal'; myst.FontSize= 24;
+            set(gcf,'Colormap',jet(40)); 
+            arrayfun(@(x) set(x,'color',[0,0,0],'XLabel',text(0,0,'Acceptor F'),'YLabel',text(0,0,'Donor F'),'XLim',[0,600],'YLim',[0,2000],'xcolor',[1,1,1],'ycolor',[1,1,1],'linewidth',4,'fontsize',18,'TickDir','out'), ax_); end
+            
+            % Filter by start time %
+            fret = cell2mat( arrayfun( @(x) cell2mat(fret_truncated(x))', intersect( find(starttime<4000),find( result_ == 1) ), 'UniformOutput', false ) );
+            
+            % Create the Gaussian fit for the fret data
+            mygm = fitgmdist( fret(:),1 );
+            
+            if vis; figure('color','w');
+            bins = [0:0.025:1];
             counts = histc(fret(:),bins);
-            bar( bins, counts )
-            title( nanmean(fret(:)) )
-            subplot(1,2,2);
-            plot( sort(fret_by_particle) );
-            suptitle( obj.filename );
+            bar( bins, counts ); hold on;
+            scatter( bins, counts, 60, 'k', 'filled' );
             
-            datacursormode on
-            fig = figure('color','w');
-            dcm_obj = datacursormode(fig);
-            scatter( [1:numel(lengths_by_particle)], fret_by_particle, 1+lengths_by_particle, 'filled' );
-            set(dcm_obj,'UpdateFcn',{@fretAnalysisObject.myupdatefcn3, obj, fret});
-            xlabel('Frame'); ylabel('FRET efficiency');
+            title( sprintf('Cell %s (%s)', obj.cellnum{1}, movType ), 'color', 'k', 'fontweight', 'normal', 'fontsize', 24 ); box off;
+            set(gca,'color',[1,1,1],'xcolor',[0,0,0],'ycolor',[0,0,0],'linewidth',4,'fontsize',18,'TickDir','out');
+            
+            counts = pdf( mygm, bins' ) * mean(diff(bins)) * numel(fret(:));
+            line( bins', counts, 'color', 'k', 'linewidth', 3 );
+            filename = sprintf('c:\\#wes_smfret\\figures\\%s_Histogram_Cell_%s_%s.png', obj.experimentName, obj.cellnum{1}, movType );
+            saveas(gcf, filename);
+            end
+            
+            obj.fretTraces.Fret.(sprintf('Calculated_%s',movType)) = fret;
+            obj.fretTraces.Fret.gmfit = mygm;
+            obj.fretTraces.Fret.kept_particles_logical = result_;
             
         end
         
@@ -602,20 +635,22 @@ classdef fretAnalysisObject < handle
             
         end
         
-        function watch( obj, N, videoFlag )
+        function watch( obj, N, videoFlag, frames )
             
                 mydata = obj.fretTraces.Ch2.x(N,:);
                 
                 figure;
-                idx = [ obj.fretTraces.Ch2.traceMetadata(N).startOfTrace:obj.fretTraces.Ch2.traceMetadata(N).endOfTrace+obj.fretTraces.Ch2.traceMetadata(N).lenBaseline]; 
+                idx = [ obj.fretTraces.Ch2.traceMetadata(N).startOfTrace:obj.fretTraces.Ch2.traceMetadata(N).endOfTrace]; 
                 
                 if videoFlag;
                 videoObj = VideoWriter( sprintf('c:\\temp\\particle_%i',N), 'MPEG-4');
                 open(videoObj);
                 end
                 
+                if isempty(frames); frames = idx; end;
+                
                 figure('color','w');
-                for frame_ = idx
+                for frame_ = frames;% idx
 
                     x=fix( obj.fretTraces.Ch2.x(N,frame_) );
                     y=fix( obj.fretTraces.Ch2.y(N,frame_) );
@@ -626,7 +661,7 @@ classdef fretAnalysisObject < handle
                     end
                     
                     imagesc( obj.images{frame_}( y+[-dw:dw], x+[-dw:dw] ), [0, 100] );
-                    title( sprintf('Particles: %i Frame: %i',obj.ROImatrix(N,frame_),frame_) )
+                    title( sprintf('Frame: %i',frame_) )
                     
                     if videoFlag
                     frame = getframe(gcf);
@@ -641,11 +676,62 @@ classdef fretAnalysisObject < handle
                 
         end
         
+        
+        function fretTraces = make_cellViewTraces( obj )
+            
+            fretTraces = obj.fretTraces;
+            for ch = {'Ch1','Ch2'}
+                fretTraces.(ch{1}).int_original = fretTraces.(ch{1}).int;
+                fretTraces.(ch{1}).int = fretTraces.(ch{1}).int_clean; 
+            
+                fretTraces.(ch{1}) = rmfield(fretTraces.(ch{1}),'int_clean');
+                fretTraces.(ch{1}).int( ~obj.fretTraces.Fret.kept_particles_logical, : ) = nan;
+            end
+            
+        end
+        
     end
     
     
     methods(Static)
         
+        
+        function output = findNormDistPoints( mydata, mylabels )
+            
+            svm = fitcsvm( mydata, mylabels );
+            sv = svm.SupportVectors;
+            %figure; plot( sv(:,1), sv(:,2), 'o' )
+
+            output = polyfit( sv(:,1), sv(:,2) , 1 );
+            [ xmin,xmax ] = deal( -output(2)/output(1)*100, max(mydata(:,1)) )
+            vertices = [ xmin, polyval(output,xmin) ; xmax, polyval(output,xmin); xmax, polyval(output,xmax) ]
+
+            in_poly = inpolygon( mydata(:,1), mydata(:,2), vertices(:,1), vertices(:,2) );
+
+            figure; plot( sv(:,1), sv(:,2), 'o' ); lsline
+            hold on;  plot( mydata( in_poly, 1 ), mydata( in_poly, 2 ), 'o' )
+            hold on;  plot( mydata( ~in_poly, 1 ), mydata( ~in_poly, 2 ), 'ko' )
+
+            [x1,x2] = deal( mydata( ~in_poly, 1 ), mydata( ~in_poly, 2 ) );
+            GMModel = fitgmdist ( [x1,x2], 1 );
+
+            gmPDF = @(x1,x2)reshape(pdf(GMModel,[x1(:) x2(:)]),size(x1));
+            g = gca;
+            fcontour(gmPDF,[g.XLim g.YLim])
+            
+            y = gmPDF( mydata(:,1), mydata(:,2) );
+            [ gm_x, gm_y ] = deal( linspace( min(y), max(y), 30 ), histc( y, linspace( min(y), max(y), 30 ) ) );
+            %figure; bar( linspace( min(y), max(y), 20 ), histc( y, linspace( min(y), max(y), 20 ) ) );
+            [~,b] = min( gm_y(1:end-1) );
+            threshold_ = 1.5*10^-6;
+            
+            %plot( vertices(:,1), vertices(:,2), 'r--' )
+            figure; scatter( mydata(:,1), mydata(:,2), 20 );
+            hold on; scatter( mydata(find(y>threshold_),1), mydata(find(y>threshold_),2), 20 );
+
+            output = find(y>threshold_);
+            
+        end
         
         function output = nanzscore( matrix )
            
@@ -690,28 +776,45 @@ classdef fretAnalysisObject < handle
         
         function output = numrois( myim, mean_, std_ ) % Zthresh is calculated on a per frame basis
             
-            output.NumObjects = nan;
-            output.NumPixels = nan;
-            output.MeanIntensity = nan;
+            output.NumObjects = 0;
+            output.NumPixels = 0;
+            output.MeanIntensity = 0;
             
             if nargin==0
                 return;
             end
             
             zscore2 = @(x) (x - mean_) ./ std_;
-            zscoreparam = 3;
+            zscoreparam = 2;
             bwareaopen_param=2;
+            
             myim_z = zscore2(myim) > zscoreparam;
             im_features = bwconncomp( myim_z );
             
             %im_features = bwconncomp( bwareaopen( zscore2( myim ) > zscoreparam, bwareaopen_param) );
             %output = numel(im_features.PixelIdxList{1});
-            if im_features.NumObjects==0; return; end
+            
+            %if im_features.NumObjects==0; output.NumObjects = 0; output.NumPixels = 0; output.MeanIntensity = 0; return; end
             
             output.NumObjects = im_features.NumObjects;
-            output.NumPixels = numel( im_features.PixelIdxList{1} );
-            output.MeanIntensity = mean(myim(myim_z));
+            output.NumPixels = nansum( cellfun( @(x) numel(x), im_features.PixelIdxList ) );
+            output.MeanIntensity = nanmean(nanmean(myim));
                 
+        end
+        
+        function output = removeNaNs( input )
+           
+            nanvals = find( isnan(input)==1 );
+            
+            x = setdiff( [1:numel(input)], nanvals );
+            v = input(x);
+            xq = nanvals;
+            
+            y = interp1( x,v,xq );
+            input(xq) = y;
+            
+            output = input;
+            
         end
         
         function auroc_value = auroc( data, split, window )
@@ -747,6 +850,7 @@ classdef fretAnalysisObject < handle
                 auroc_value = trapz(sort(fp),tp(b));
 
         end
+        
         
     end
     

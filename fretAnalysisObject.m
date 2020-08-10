@@ -1,6 +1,5 @@
 classdef fretAnalysisObject < handle
     
-    
     % USAGE %
     %
     % Load in data:
@@ -15,7 +14,7 @@ classdef fretAnalysisObject < handle
     properties
         images
         acceptor_images
-        
+            
         fretTraces
         ROImatrix
         dcmss
@@ -41,11 +40,14 @@ classdef fretAnalysisObject < handle
         
         % Interference detection parameters %
         dw = 2;
-        min_corr = 0.7;
+        min_corr = 0.85;
         Intensity_Distribution_Parameters = struct('mu',[20 20],'Sigma',[10 0;0 50],'CovarianceType','full'); 
         Lowpass_Parameters = [0.1,0.1,10]; % x blur, y blur, and t blur (10 frames are used for more distant interference) 
         Highpass_Parameters = [0.1,0.1,3]; % (here 3 frames are used for more recent interferences)
         template = padarray( padarray( fspecial('gaussian',3,1), 1, -5 )', 1, -5 );
+        
+        % Save directory %
+        savedir = '';
         
     end
     
@@ -95,11 +97,11 @@ classdef fretAnalysisObject < handle
             
             myoutput = []; 
             fprintf('Processing background for Ch1...\n');
-            for i = 1:Nframes; myoutput.Ch1(:,:,i) = blockproc( double( obj.acceptor_images{i} ), [blocksize blocksize], @(x) nanmedian(nanmedian(x.data)),...
+            for i = 1:Nframes; myoutput.Ch1(:,:,i) = blockproc( double( obj.acceptor_images{i} ), [blocksize blocksize], @(x) nanmedian(x.data(:)),...
                     'PadPartialBlocks', true, 'PadMethod', 'symmetric' ); end;
             
             fprintf('Processing background for Ch2...\n');
-            for i = 1:Nframes; myoutput.Ch2(:,:,i) = blockproc( double( obj.images{i} ), [blocksize blocksize], @(x) nanmedian(nanmedian(x.data)),...
+            for i = 1:Nframes; myoutput.Ch2(:,:,i) = blockproc( double( obj.images{i} ), [blocksize blocksize], @(x) nanmedian(x.data(:)),...
                     'PadPartialBlocks', true, 'PadMethod', 'symmetric' ); end;
             
             grid_ = reshape( [1:(Nblocks*Nblocks)], Nblocks, Nblocks );
@@ -158,11 +160,11 @@ classdef fretAnalysisObject < handle
                     [x,y] = deal( nan_removed_x(frame_), nan_removed_y(frame_) );   
                     obj.images{frame_}( y+[-dw:dw], x+[-dw:dw] ) = obj.register( register_template , obj.images{frame_}( y+[-dw:dw], x+[-dw:dw] ) );            
                     molecule_image(:,:,frame_) = obj.images{frame_}( [max(y-dw,1):min(y+dw,imcols)], [max(x-dw,1):min(x+dw,imrows)] ) - ...
-                        nanmean( obj.background_by_cell.Ch2( obj.background_grid(x,y), frame_ ) );
+                        nanmean( obj.background_by_cell.Ch2( obj.background_grid(y,x), frame_ ) );
                     
                     obj.acceptor_images{frame_}( y+[-dw:dw], x+[-dw:dw] ) = obj.register( register_template , obj.acceptor_images{frame_}( y+[-dw:dw], x+[-dw:dw] ) );
                     acceptor_image(:,:,frame_) = obj.acceptor_images{frame_}( [max(y-dw,1):min(y+dw,imcols)], [max(x-dw,1):min(x+dw,imrows)] ) - ...
-                        nanmean( obj.background_by_cell.Ch1( obj.background_grid(x,y), frame_ ) );
+                        nanmean( obj.background_by_cell.Ch1( obj.background_grid(y,x), frame_ ) );
                 end
                 
                 % Convolve the data using a 3d gaussian to capture interference as both a temporal
@@ -178,11 +180,13 @@ classdef fretAnalysisObject < handle
                 % Fill the 'traceInterference' attribute of the object
                 obj.traceInterference(N,idx) = score_(idx);
                 
+                sum2 = @(x) sum(sum(x));
+                
                 obj.Ch1.adjusted_intensity(N,:) = nan(1,obj.Ntimes);
-                obj.Ch1.adjusted_intensity(N,idx) = arrayfun( @(x) mean2(acceptor_image([2:4],[2:4],x)), idx ); %squeeze(molecule_image(3,3,idx));
+                obj.Ch1.adjusted_intensity(N,idx) = arrayfun( @(x) sum2(acceptor_image([2:4],[2:4],x)), idx ); %squeeze(molecule_image(3,3,idx));
                 
                 obj.Ch2.adjusted_intensity(N,:) = nan(1,obj.Ntimes);
-                obj.Ch2.adjusted_intensity(N,idx) = arrayfun( @(x) mean2(molecule_image([2:4],[2:4],x)), idx ); %squeeze(molecule_image(3,3,idx));
+                obj.Ch2.adjusted_intensity(N,idx) = arrayfun( @(x) sum2(molecule_image([2:4],[2:4],x)), idx ); %squeeze(molecule_image(3,3,idx));
                 
             end
             
@@ -244,6 +248,12 @@ classdef fretAnalysisObject < handle
             fret(find(fret>=1 | fret<=0 ))=nan;
             fret_truncated = arrayfun( @(x) fret( x, find(  fret(x,:)>0 & isnan( fret(x,:) ) == 0 , 500 ) ), [1:size(fret,1)], 'UniformOutput', false );
             
+            % Calculate prebleach F values and see which may be unlikely %
+            % Ch1_ch2 prebleach F is a two column array with rows equal to
+            % the number of tracks under analysis
+            prebleach_values_Ch1_Ch2 = arrayfun( @(x) obj.getBleach_single( x ), [1 : obj.Ntracks] );
+            ch1_ch2_prebleach_F = [arrayfun( @(x) x.Ch1.F_prebleach, prebleach_values_Ch1_Ch2 )', arrayfun( @(x) x.Ch2.F_prebleach, prebleach_values_Ch1_Ch2 )'];
+            
             % fret_idxes will index the timepoint at which a fret value was
             % observed
             fret_idxes = arrayfun( @(x) find(  fret(x,:)>0 & isnan( fret(x,:) ) == 0 , 500 ), [1:size(fret,1)], 'UniformOutput', false );
@@ -251,15 +261,6 @@ classdef fretAnalysisObject < handle
             ch2_intensity =  arrayfun( @(x) obj.fretTraces.Ch2.int_clean( x, find(  fret(x,:)>0 & isnan( fret(x,:) ) == 0 , 500 ) ), [1:obj.Ntracks], 'UniformOutput', false );
 
             [fret_idxes, ch1_intensity, ch2_intensity] = deal( cell2mat( fret_idxes )', cell2mat( ch1_intensity )', cell2mat( ch2_intensity )' );
-            
-            % Calculate prebleach F values and see which may be unlikely %
-            fret_by_particle = cellfun( @(x) nanmean( x(x>0) ), fret_truncated );
-            outputs = arrayfun( @(x) obj.getBleach_single( x ), [1 : obj.Ntracks] );
-            
-            % Ch1_ch2 prebleach F is a two column array with rows equal to
-            % the number of tracks under analysis
-            
-            ch1_ch2_prebleach_F = [arrayfun( @(x) x.Ch1.F_prebleach, outputs )', arrayfun( @(x) x.Ch2.F_prebleach, outputs )'];
             
             % 'VariableNames', {'Min_Ch1','Max_Ch1','Min_Ch2','Max_Ch2'} )
             % Rows are each of the groups produced by dbscan
@@ -291,7 +292,13 @@ classdef fretAnalysisObject < handle
             fret_by_cell_gm = fitgmdist( [ch1_ch2_prebleach_F(:,1), ch1_ch2_prebleach_F(:,2)], 1 );
             
             ll_data = pdf( fret_by_cell_gm, [ch1_ch2_prebleach_F(:,1), ch1_ch2_prebleach_F(:,2)] );
-            result_ = ll_data > 4*10^-4;
+            
+            init_ll = 10^-3;
+            potential_fret = sum(sum(~isnan(fret)));
+            result_ = 0; while numel( find(result_>0) )./sum(and(~isnan(ch1_ch2_prebleach_F(:,1)),~isnan(ch1_ch2_prebleach_F(:,2)))) < .2; 
+                result_ = ll_data > init_ll;
+                init_ll = init_ll*(1/2);
+            end
             starttime = arrayfun( @(x) x.endOfTrace, obj.fretTraces.Ch1.traceMetadata )';
             npoints = cellfun( @(x) numel(x), fret_truncated );
             
@@ -398,14 +405,18 @@ classdef fretAnalysisObject < handle
                         continue
                     end
                     
-                    if firstframe; max_intensity = max( max( obj.images{frame_}( y+[-dw:dw], x+[-dw:dw] ) ) ); firstframe=0; end
+                    if firstframe; [max_intensity.Ch1,max_intensity.Ch2] = deal( max( max( obj.images{frame_}( y+[-dw:dw], x+[-dw:dw] ) ) ), ...
+                            max( max( obj.acceptor_images{frame_}( y+[-dw:dw], x+[-dw:dw] ) ) ) );
+                        
+                        firstframe=0; end
                     
                     %[ax_(2).XTick,ax_(2).YTick] = deal([],[]); [ax_(2).XColor,ax_(2).YColor] = deal('w','w');
                     %imagesc(  ax_(2), obj.images{frame_}( y+[-dw:dw], x+[-dw:dw] ), [0, 400] ); axis tight;
                     %title( sprintf('Frame: %i',frame_), 'parent', ax_(2) );
                     
-                    imagesc(  gca, obj.images{frame_}( y+[-dw:dw], x+[-dw:dw] ), [ 0, max_intensity ] ); axis tight;
-                    set(gca,'XTick',[],'YTick',[],'Xcolor','w','YColor','w','Position',[0,0,1,1]);
+                    subplot(1,2,1); imagesc(  gca, obj.images{frame_}( y+[-dw:dw], x+[-dw:dw] ), [ 0, max_intensity.Ch1 ] ); axis tight;
+                    subplot(1,2,2); imagesc(  gca, obj.acceptor_images{frame_}( y+[-dw:dw], x+[-dw:dw] ), [ 0, max_intensity.Ch1 ] ); axis tight;
+                    %set(gca,'XTick',[],'YTick',[],'Xcolor','w','YColor','w','Position',[0,0,1,1]);
                     
                     if videoFlag
                     frame = getframe(gcf);
@@ -418,6 +429,16 @@ classdef fretAnalysisObject < handle
                 
                 if videoFlag; close(videoObj); end;
                 
+        end
+        
+        function saveFret( obj )
+           
+            obj.images = 'Cleared';
+            obj.acceptor_images = 'Cleared';
+            filename = sprintf('%s_Cell%s_fretObject.mat',obj.experimentName,obj.cellnum{1});
+            
+            save( filename, 'obj' );
+            
         end
         
         function fretTraces = make_cellViewTraces( obj )
